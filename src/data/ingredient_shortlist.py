@@ -24,40 +24,40 @@ class IngredientSpec:
 
 SHORTLIST: list[IngredientSpec] = [
     # --- Muscle meat (proteins)
-    IngredientSpec("chicken_breast",  "Chicken breast",       "protein", "soft"),
-    IngredientSpec("chicken_thigh",   "Chicken thigh",        "protein", "soft"),
-    IngredientSpec("turkey_breast",   "Turkey breast",        "protein", "soft"),
-    IngredientSpec("turkey_thigh",    "Turkey thigh",         "protein", "soft"),
-    IngredientSpec("beef_lean",       "Lean ground beef",     "protein", "soft"),
-    IngredientSpec("pork_lean",       "Lean pork",            "protein", "soft"),
-    IngredientSpec("rabbit",          "Rabbit",               "protein", "soft"),
-    IngredientSpec("duck",            "Duck (no skin)",       "protein", "soft"),
-    IngredientSpec("salmon",          "Salmon",               "protein", "soft"),
-    IngredientSpec("sardine",         "Sardine",              "protein", "soft"),
-    IngredientSpec("tuna_light",      "Light tuna",           "protein", "soft"),
-    IngredientSpec("cod",             "Cod",                  "protein", "soft"),
+    IngredientSpec("chicken_breast",  "Chicken breast",       "protein", "soft", fdc_id=2646170),
+    IngredientSpec("chicken_thigh",   "Chicken thigh",        "protein", "soft", fdc_id=173627),
+    IngredientSpec("turkey_breast",   "Turkey breast",        "protein", "soft", fdc_id=171098),
+    IngredientSpec("turkey_thigh",    "Turkey thigh",         "protein", "soft", fdc_id=171533),
+    IngredientSpec("beef_lean",       "Lean ground beef",     "protein", "soft", fdc_id=2514744),
+    IngredientSpec("pork_lean",       "Lean pork",            "protein", "soft", fdc_id=168249),
+    IngredientSpec("rabbit",          "Rabbit",               "protein", "soft", fdc_id=172521),
+    IngredientSpec("duck",            "Duck (no skin)",       "protein", "soft", fdc_id=172410),
+    IngredientSpec("salmon",          "Salmon",               "protein", "soft", fdc_id=173686),
+    IngredientSpec("sardine",         "Sardine",              "protein", "soft", fdc_id=175139),
+    IngredientSpec("tuna_light",      "Light tuna",           "protein", "soft", fdc_id=171986),
+    IngredientSpec("cod",             "Cod",                  "protein", "soft", fdc_id=171955),
 
     # --- Organs (key for taurine, vit A, B-vitamins)
-    IngredientSpec("chicken_liver",   "Chicken liver",        "organ",   "soft"),
-    IngredientSpec("chicken_heart",   "Chicken heart",        "organ",   "medium"),
-    IngredientSpec("beef_liver",      "Beef liver",           "organ",   "soft"),
-    IngredientSpec("beef_kidney",     "Beef kidney",          "organ",   "soft"),
+    IngredientSpec("chicken_liver",   "Chicken liver",        "organ",   "soft", fdc_id=171060),
+    IngredientSpec("chicken_heart",   "Chicken heart",        "organ",   "medium", fdc_id=171458),
+    IngredientSpec("beef_liver",      "Beef liver",           "organ",   "soft", fdc_id=169451),
+    IngredientSpec("beef_kidney",     "Beef kidney",          "organ",   "soft", fdc_id=169449),
 
     # --- Eggs / dairy
-    IngredientSpec("egg_whole",       "Whole egg (cooked)",   "protein", "soft"),
-    IngredientSpec("egg_yolk",        "Egg yolk",             "protein", "soft"),
+    IngredientSpec("egg_whole",       "Whole egg (cooked)",   "protein", "soft", fdc_id=173424),
+    IngredientSpec("egg_yolk",        "Egg yolk",             "protein", "soft", fdc_id=172184),
 
     # --- Carbs / fiber (small amounts; cats are obligate carnivores)
-    IngredientSpec("white_rice",      "Cooked white rice",    "carb",    "soft"),
-    IngredientSpec("oats",            "Cooked oats",          "carb",    "soft"),
-    IngredientSpec("pumpkin",         "Cooked pumpkin",       "veg",     "soft"),
-    IngredientSpec("sweet_potato",    "Cooked sweet potato",  "veg",     "soft"),
-    IngredientSpec("carrot",          "Cooked carrot",        "veg",     "medium"),
-    IngredientSpec("zucchini",        "Cooked zucchini",      "veg",     "soft"),
+    IngredientSpec("white_rice",      "Cooked white rice",    "carb",    "soft", fdc_id=168930),
+    IngredientSpec("oats",            "Cooked oats",          "carb",    "soft", fdc_id=168873),
+    IngredientSpec("pumpkin",         "Cooked pumpkin",       "veg",     "soft", fdc_id=168449),
+    IngredientSpec("sweet_potato",    "Cooked sweet potato",  "veg",     "soft", fdc_id=168483),
+    IngredientSpec("carrot",          "Cooked carrot",        "veg",     "medium", fdc_id=170394),
+    IngredientSpec("zucchini",        "Cooked zucchini",      "veg",     "soft", fdc_id=169292),
 
     # --- Fats
-    IngredientSpec("salmon_oil",      "Salmon oil",           "fat",     "soft"),
-    IngredientSpec("olive_oil",       "Olive oil",            "fat",     "soft"),
+    IngredientSpec("salmon_oil",      "Salmon oil",           "fat",     "soft", fdc_id=172343),
+    IngredientSpec("olive_oil",       "Olive oil",            "fat",     "soft", fdc_id=171413),
 
     # --- Supplements (dosed in mg, not bulk grams; treated specially in scorer)
     IngredientSpec("taurine_powder",  "Taurine powder",       "supplement", "soft"),

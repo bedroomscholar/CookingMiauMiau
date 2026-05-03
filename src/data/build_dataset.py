@@ -14,7 +14,7 @@ import pandas as pd
 
 from src.config import INGREDIENTS_CSV, PROCESSED_DIR
 from src.data.ingredient_shortlist import SHORTLIST
-from src.data.usda_client import NUTRIENT_MAP, UsdaClient
+from src.data.usda_client import OUTPUT_COLS, UsdaClient
 
 # Fallbacks for nutrients USDA often omits (mg per 100g as-fed) and for
 # pure supplements that aren't USDA foods at all.
@@ -77,7 +77,7 @@ def build(cache_only: bool = False) -> pd.DataFrame:
             print(f"  SKIP {spec.key}: no fdc_id and no manual override", file=sys.stderr)
             continue
 
-        row = {col: 0.0 for col in NUTRIENT_MAP.values()}
+        row = {col: 0.0 for col in OUTPUT_COLS}
         if spec.fdc_id != 0:
             row.update(client.get_nutrients(spec.fdc_id))
         if spec.key in MANUAL_OVERRIDES:
@@ -93,7 +93,7 @@ def build(cache_only: bool = False) -> pd.DataFrame:
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
-    cols = ["key", "display", "category", "texture", "fdc_id"] + list(NUTRIENT_MAP.values())
+    cols = ["key", "display", "category", "texture", "fdc_id"] + list(OUTPUT_COLS)
     df = df[cols].set_index("key")
     df.to_csv(INGREDIENTS_CSV)
     print(f"\nWrote {len(df)} ingredients → {INGREDIENTS_CSV}")

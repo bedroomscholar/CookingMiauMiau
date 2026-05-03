@@ -6,6 +6,12 @@ docs/
 # USDA cached JSON — rebuildable, can be large
 data/raw/
 
+# Runtime SQLite + per-cat session caches
+data/sessions/
+*.db
+*.sqlite
+*.sqlite3
+
 # Python
 __pycache__/
 *.pyc
@@ -28,3 +34,6 @@ env/
 Thumbs.db
 .idea/
 .vscode/
+
+# Testing
+tests/

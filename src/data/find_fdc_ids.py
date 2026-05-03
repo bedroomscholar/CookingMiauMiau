@@ -172,28 +172,35 @@ class _QuitAndSave(Exception):
 
 
 def rewrite_shortlist(picks: dict[str, int]) -> int:
-    """Inject `, fdc_id=NNN` into each matching IngredientSpec line. Idempotent."""
-    text = SHORTLIST_PY.read_text(encoding="utf-8")
+    """Inject `, fdc_id=NNN` into each matching IngredientSpec line. Idempotent.
+
+    Done per-line by string surgery rather than regex over the whole file —
+    display names can contain parens like "Duck (no skin)" which trip up
+    naive `[^)]*` regexes.
+    """
+    lines = SHORTLIST_PY.read_text(encoding="utf-8").splitlines(keepends=True)
+    remaining = {k: v for k, v in picks.items() if v > 0}
     n = 0
-    for key, fdc_id in picks.items():
-        if fdc_id <= 0:
-            continue
-        # Match an IngredientSpec(...) line for this key that doesn't already have fdc_id.
-        pattern = re.compile(
-            r'(IngredientSpec\(\s*"' + re.escape(key) + r'"[^)]*?)(\)\s*,?)(\s*(?:#[^\n]*)?\n)'
-        )
-        def repl(m: re.Match[str]) -> str:
-            head, close, tail = m.group(1), m.group(2), m.group(3)
-            if "fdc_id" in head:
-                return m.group(0)
-            return f"{head}, fdc_id={fdc_id}{close}{tail}"
-        new_text, count = pattern.subn(repl, text, count=1)
-        if count:
-            text = new_text
+    for i, line in enumerate(lines):
+        for key, fdc_id in list(remaining.items()):
+            needle = f'IngredientSpec("{key}",'
+            if needle not in line:
+                continue
+            if "fdc_id" in line:
+                del remaining[key]
+                break
+            # Inject before the IngredientSpec call's closing paren — the last
+            # ')' on the line, since the trailing ',' (if any) follows it.
+            close_idx = line.rfind(")")
+            if close_idx == -1:
+                break
+            lines[i] = line[:close_idx] + f", fdc_id={fdc_id}" + line[close_idx:]
+            del remaining[key]
             n += 1
-        else:
-            print(f"  WARN: could not locate IngredientSpec line for {key}", file=sys.stderr)
-    SHORTLIST_PY.write_text(text, encoding="utf-8")
+            break
+    for key in remaining:
+        print(f"  WARN: could not locate IngredientSpec line for {key}", file=sys.stderr)
+    SHORTLIST_PY.write_text("".join(lines), encoding="utf-8")
     return n
 
 
