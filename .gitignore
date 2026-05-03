@@ -1,0 +1,30 @@
+# Secrets
+.env
+.env.local
+docs/
+
+# USDA cached JSON — rebuildable, can be large
+data/raw/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+env/
+.claude/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

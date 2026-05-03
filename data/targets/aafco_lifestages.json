@@ -1,0 +1,69 @@
+{
+  "_about": {
+    "basis": "Per 100 g dry matter (DMB). Stage chosen by age computed from the cat's date of birth.",
+    "sources": [
+      "AAFCO 2016 Cat Food Nutrient Profiles — Growth/Reproduction and Adult Maintenance",
+      "FEDIAF 2021 Nutritional Guidelines for Cats",
+      "AAHA Senior Care Guidelines (2021) for renal-conscious adjustments"
+    ],
+    "scoring_rule": "For each nutrient: 100 if value within [min,max], linearly decays to 0 at ±50 % outside the band. Final score = mean of per-nutrient scores.",
+    "stage_boundaries_years": {
+      "kitten": [0.0, 1.0],
+      "adult":  [1.0, 7.0],
+      "mature": [7.0, 10.0],
+      "senior": [10.0, 999.0]
+    },
+    "_notes": [
+      "kitten = AAFCO Growth/Reproduction profile (higher protein/fat/Ca for growth)",
+      "adult  = AAFCO Adult Maintenance baseline",
+      "mature = adult + protein bump (counter sarcopenia), modest phosphorus cap",
+      "senior = mature + tighter phosphorus cap + lower sodium (renal-conscious)"
+    ]
+  },
+  "stages": {
+    "kitten": {
+      "protein_g":     { "min": 30.0, "target": 40.0, "max": 55.0, "unit": "g/100g DM" },
+      "fat_g":         { "min": 9.0,  "target": 22.0, "max": 35.0, "unit": "g/100g DM" },
+      "calcium_mg":    { "min": 1000, "target": 1200, "max": 2500, "unit": "mg/100g DM" },
+      "phosphorus_mg": { "min": 800,  "target": 1000, "max": 1600, "unit": "mg/100g DM" },
+      "ca_p_ratio":    { "min": 1.0,  "target": 1.2,  "max": 1.8,  "unit": "ratio" },
+      "taurine_mg":    { "min": 100,  "target": 250,  "max": 1500, "unit": "mg/100g DM" },
+      "magnesium_mg":  { "min": 40,   "target": 60,   "max": 100,  "unit": "mg/100g DM" },
+      "sodium_mg":     { "min": 200,  "target": 400,  "max": 800,  "unit": "mg/100g DM" },
+      "potassium_mg":  { "min": 600,  "target": 800,  "max": 1500, "unit": "mg/100g DM" }
+    },
+    "adult": {
+      "protein_g":     { "min": 26.0, "target": 35.0, "max": 50.0, "unit": "g/100g DM" },
+      "fat_g":         { "min": 9.0,  "target": 18.0, "max": 30.0, "unit": "g/100g DM" },
+      "calcium_mg":    { "min": 600,  "target": 800,  "max": 2500, "unit": "mg/100g DM" },
+      "phosphorus_mg": { "min": 500,  "target": 700,  "max": 1200, "unit": "mg/100g DM" },
+      "ca_p_ratio":    { "min": 1.0,  "target": 1.3,  "max": 2.0,  "unit": "ratio" },
+      "taurine_mg":    { "min": 100,  "target": 250,  "max": 1500, "unit": "mg/100g DM" },
+      "magnesium_mg":  { "min": 40,   "target": 60,   "max": 100,  "unit": "mg/100g DM" },
+      "sodium_mg":     { "min": 200,  "target": 350,  "max": 800,  "unit": "mg/100g DM" },
+      "potassium_mg":  { "min": 600,  "target": 800,  "max": 1500, "unit": "mg/100g DM" }
+    },
+    "mature": {
+      "protein_g":     { "min": 30.0, "target": 40.0, "max": 55.0, "unit": "g/100g DM" },
+      "fat_g":         { "min": 9.0,  "target": 18.0, "max": 28.0, "unit": "g/100g DM" },
+      "calcium_mg":    { "min": 600,  "target": 800,  "max": 2200, "unit": "mg/100g DM" },
+      "phosphorus_mg": { "min": 500,  "target": 650,  "max": 900,  "unit": "mg/100g DM" },
+      "ca_p_ratio":    { "min": 1.1,  "target": 1.4,  "max": 2.0,  "unit": "ratio" },
+      "taurine_mg":    { "min": 100,  "target": 250,  "max": 1500, "unit": "mg/100g DM" },
+      "magnesium_mg":  { "min": 40,   "target": 55,   "max": 90,   "unit": "mg/100g DM" },
+      "sodium_mg":     { "min": 200,  "target": 300,  "max": 600,  "unit": "mg/100g DM" },
+      "potassium_mg":  { "min": 600,  "target": 800,  "max": 1500, "unit": "mg/100g DM" }
+    },
+    "senior": {
+      "protein_g":     { "min": 32.0, "target": 42.0, "max": 55.0, "unit": "g/100g DM" },
+      "fat_g":         { "min": 9.0,  "target": 17.0, "max": 25.0, "unit": "g/100g DM" },
+      "calcium_mg":    { "min": 600,  "target": 800,  "max": 2000, "unit": "mg/100g DM" },
+      "phosphorus_mg": { "min": 500,  "target": 600,  "max": 800,  "unit": "mg/100g DM" },
+      "ca_p_ratio":    { "min": 1.2,  "target": 1.5,  "max": 2.0,  "unit": "ratio" },
+      "taurine_mg":    { "min": 100,  "target": 300,  "max": 1500, "unit": "mg/100g DM" },
+      "magnesium_mg":  { "min": 40,   "target": 50,   "max": 80,   "unit": "mg/100g DM" },
+      "sodium_mg":     { "min": 200,  "target": 280,  "max": 500,  "unit": "mg/100g DM" },
+      "potassium_mg":  { "min": 700,  "target": 900,  "max": 1500, "unit": "mg/100g DM" }
+    }
+  }
+}
