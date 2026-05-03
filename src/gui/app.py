@@ -47,6 +47,18 @@ TEXTURES = ("soft", "medium", "hard")
 RESPONSES = ("ate_all", "half", "refused")
 
 
+def _parse_dob(raw: str) -> date:
+    """Accept the DD-MM-YYYY format the GUI uses; fall back to ISO."""
+    s = raw.strip().replace("/", "-").replace(".", "-")
+    if not s:
+        raise ValueError("date of birth is required")
+    parts = s.split("-")
+    if len(parts) == 3 and len(parts[0]) == 2 and len(parts[2]) == 4:
+        d, m, y = parts
+        return date(int(y), int(m), int(d))
+    return date.fromisoformat(s)
+
+
 def _format_recipe_parts(recipe: dict[str, float], ingredients) -> list[dict]:
     parts = []
     for k, g in sorted(recipe.items(), key=lambda kv: -kv[1]):
@@ -153,7 +165,7 @@ class Api:
             name = str(payload.get("name", "")).strip()
             if not name:
                 return {"ok": False, "error": "Name is required."}
-            dob = date.fromisoformat(str(payload.get("dob", "")).strip())
+            dob = _parse_dob(str(payload.get("dob", "")))
             weight = float(payload.get("weight_kg", 0))
             activity = str(payload.get("activity", "medium"))
             texture_max = str(payload.get("texture_max", "hard"))
@@ -283,7 +295,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
     --accent-d:  #A85C40;
     --butter:    #E8C9A0;
     --sage:      #7A9471;
-    --danger:    #B85450;
+    --danger:    #8B1A1F;
+    --danger-d:  #6F1418;
     --shadow:    0 4px 24px rgba(89, 60, 38, 0.08);
     --shadow-sm: 0 2px 8px rgba(89, 60, 38, 0.06);
     --radius:    14px;
@@ -337,21 +350,33 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .tab {
     padding: 10px 22px;
     cursor: pointer;
-    color: var(--ink-soft);
+    color: var(--muted);
     font-weight: 500;
     border: none;
     background: transparent;
     border-bottom: 2px solid transparent;
     margin-bottom: -1px;
-    transition: color 0.18s, border-color 0.18s;
+    transition: color 0.18s, background 0.18s, border-color 0.18s;
     font-family: inherit;
     font-size: 14px;
     letter-spacing: 0.3px;
+    border-radius: 6px 6px 0 0;
   }
-  .tab:hover { color: var(--accent); }
+  /* Hover (inactive): neutral darken, NOT accent — keeps accent reserved
+     for the selected tab so the two states never blur together. */
+  .tab:hover {
+    color: var(--ink);
+    background: var(--bg-soft);
+  }
   .tab.active {
     color: var(--accent-d);
-    border-bottom-color: var(--accent);
+    font-weight: 600;
+    border-bottom: 2.5px solid var(--accent);
+    background: transparent;
+  }
+  .tab.active:hover {
+    color: var(--accent-d);
+    background: rgba(201, 123, 92, 0.08);
   }
   main {
     flex: 1;
@@ -425,9 +450,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
   button.ghost:hover { background: var(--bg-soft); color: var(--ink); }
   button.danger { background: var(--danger); }
-  button.danger:hover { background: #962F2B; }
+  button.danger:hover { background: var(--danger-d); }
   button.sage { background: var(--sage); }
   button.sage:hover { background: #5F7A57; }
+  button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+  button:disabled:hover { background: var(--danger); }
   button.icon {
     padding: 6px 10px; font-size: 12px;
   }
@@ -693,7 +724,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
           <div class="cat-list scroll" id="catList" style="flex:1; min-height:0;"></div>
           <div style="display:flex; gap:8px; margin-top:12px;">
             <button id="catNew" class="ghost">+ New</button>
-            <button id="catDelete" class="ghost danger" style="color:var(--danger); border-color:var(--danger);">Delete</button>
+            <button id="catDelete" class="danger">Delete</button>
           </div>
         </div>
         <div class="panel scroll" style="min-height:0;">
@@ -701,7 +732,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
           <form id="profileForm" autocomplete="off">
             <div class="grid">
               <div><label>Name</label><input type="text" id="pf-name"></div>
-              <div><label>Date of Birth</label><input type="date" id="pf-dob"></div>
+              <div><label>Date of Birth (DD-MM-YYYY)</label><input type="text" id="pf-dob" placeholder="DD-MM-YYYY" maxlength="10"></div>
               <div><label>Weight (kg)</label><input type="number" step="0.1" id="pf-weight"></div>
               <div><label>Activity</label><select id="pf-activity"></select></div>
               <div><label>Texture max</label><select id="pf-texture"></select></div>
@@ -791,7 +822,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <tbody></tbody>
           </table>
           <div style="margin-top:10px;">
-            <button id="lib-delete" class="ghost danger" style="color:var(--danger); border-color:var(--danger);" disabled>Delete selected (custom only)</button>
+            <button id="lib-delete" class="danger" disabled>Delete selected (custom only)</button>
           </div>
         </div>
         <div class="panel scroll" style="min-height:0;">
@@ -925,7 +956,7 @@ function selectCat(id) {
   $('#profileTitle').textContent = 'Edit · ' + cat.name;
   $('#pf-name').value = cat.name;
   $('#pf-name').readOnly = true; // name is unique key — can't rename here
-  $('#pf-dob').value = cat.dob;
+  $('#pf-dob').value = isoToDmy(cat.dob);
   $('#pf-weight').value = cat.weight_kg;
   $('#pf-activity').value = cat.activity;
   $('#pf-texture').value = cat.texture_max;
@@ -1165,6 +1196,13 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, ch => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[ch]));
+}
+
+// Backend stores DOB as ISO YYYY-MM-DD; the form shows DD-MM-YYYY.
+function isoToDmy(iso) {
+  if (!iso) return '';
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : String(iso);
 }
 
 async function boot() {
