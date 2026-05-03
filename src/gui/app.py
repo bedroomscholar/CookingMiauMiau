@@ -1,15 +1,17 @@
-"""Three-screen Tkinter GUI for the cat-food recipe system.
+"""PyWebView desktop UI for the cat-food recipe system.
 
-Tabs:
-  1. Profiles    — list, add, edit, delete cats; pick taboos from the
-                   ingredient catalogue; set DOB / weight / texture cap.
-  2. Generate    — pick a cat, generate top-N candidate recipes, hit a
-                   feedback button to record outcome (which also nudges
-                   the cat's preference weights).
-  3. History     — recent feedings per cat.
+A warm, elegant single-window app with four screens:
+
+  1. Profiles  — list, add, edit, delete cats; pick taboos.
+  2. Generate  — pick a cat, generate top-N candidate recipes,
+                 record feedback (which nudges preference weights).
+  3. History   — recent feedings per cat.
+  4. Library   — browse the merged catalogue and add custom ingredients.
 
 Heavy lifting (DB, recommender, weights, ML model) lives in the
-underlying modules; this file is the view+controller layer.
+underlying modules. This file is the view+controller layer:
+the `Api` class exposes JSON methods to JavaScript via pywebview's
+`js_api`, and the embedded HTML/CSS draws the UI.
 
 Run:
     py -m src.gui.app
@@ -17,17 +19,12 @@ Run:
 from __future__ import annotations
 
 import sqlite3
+import sys
 from datetime import date
-from pathlib import Path
-from tkinter import (
-    BOTH, END, EXTENDED, LEFT, RIGHT, TOP, X, Y,
-    StringVar, Tk, messagebox,
-)
-from tkinter import ttk
-from tkinter.scrolledtext import ScrolledText
+from typing import Any
 
 import joblib
-import pandas as pd
+import webview
 
 from src.config import INGREDIENTS_CSV, MODELS_DIR
 from src.data.library import (
@@ -50,564 +47,1195 @@ TEXTURES = ("soft", "medium", "hard")
 RESPONSES = ("ate_all", "half", "refused")
 
 
-# --- helpers -----------------------------------------------------------
-
-def _parse_dob(s: str) -> date:
-    return date.fromisoformat(s.strip())
-
-
-def _format_recipe(recipe: dict[str, float], ingredients: pd.DataFrame) -> str:
+def _format_recipe_parts(recipe: dict[str, float], ingredients) -> list[dict]:
     parts = []
     for k, g in sorted(recipe.items(), key=lambda kv: -kv[1]):
         display = ingredients.loc[k, "display"] if k in ingredients.index else k
-        parts.append(f"{display} {g:.1f}g")
-    return " · ".join(parts)
+        parts.append({"key": k, "display": display, "grams": float(g)})
+    return parts
 
 
-# --- profile tab -------------------------------------------------------
+# --- bridge ------------------------------------------------------------
 
-class ProfileTab(ttk.Frame):
-    def __init__(self, master, app: "CatFoodApp"):
-        super().__init__(master, padding=10)
-        self.app = app
-        self.selected_cat_id: int | None = None
+class Api:
+    """Methods on this class are callable from JavaScript as
+    `pywebview.api.<method>(...)`. Returned values are JSON-serialised."""
 
-        # Left: list of cats
-        left = ttk.Frame(self)
-        left.pack(side=LEFT, fill=Y, padx=(0, 12))
-        ttk.Label(left, text="Cats", font=("", 10, "bold")).pack(anchor="w")
-        self.cat_list = ttk.Treeview(left, columns=("name",), show="headings", height=14)
-        self.cat_list.heading("name", text="Name")
-        self.cat_list.column("name", width=160)
-        self.cat_list.pack(fill=Y)
-        self.cat_list.bind("<<TreeviewSelect>>", self._on_select)
-
-        btns = ttk.Frame(left)
-        btns.pack(fill=X, pady=(8, 0))
-        ttk.Button(btns, text="New",    command=self._on_new).pack(side=LEFT)
-        ttk.Button(btns, text="Delete", command=self._on_delete).pack(side=LEFT, padx=4)
-
-        # Right: form
-        right = ttk.Frame(self)
-        right.pack(side=LEFT, fill=BOTH, expand=True)
-
-        form = ttk.Frame(right)
-        form.pack(fill=X)
-
-        self.name_var      = StringVar()
-        self.dob_var       = StringVar()
-        self.weight_var    = StringVar()
-        self.activity_var  = StringVar(value="medium")
-        self.texture_var   = StringVar(value="hard")
-        self.notes_var     = StringVar()
-
-        rows = [
-            ("Name",         ttk.Entry(form, textvariable=self.name_var, width=24)),
-            ("DOB (YYYY-MM-DD)", ttk.Entry(form, textvariable=self.dob_var, width=14)),
-            ("Weight (kg)",  ttk.Entry(form, textvariable=self.weight_var, width=8)),
-            ("Activity",     ttk.Combobox(form, textvariable=self.activity_var,
-                                          values=ACTIVITIES, state="readonly", width=10)),
-            ("Texture max",  ttk.Combobox(form, textvariable=self.texture_var,
-                                          values=TEXTURES, state="readonly", width=10)),
-            ("Notes",        ttk.Entry(form, textvariable=self.notes_var, width=40)),
-        ]
-        for i, (label, widget) in enumerate(rows):
-            ttk.Label(form, text=label).grid(row=i, column=0, sticky="w", pady=2)
-            widget.grid(row=i, column=1, sticky="w", pady=2)
-
-        ttk.Label(right, text="Taboos (Ctrl/Shift to multi-select):",
-                  font=("", 10, "bold")).pack(anchor="w", pady=(12, 2))
-        taboo_wrap = ttk.Frame(right)
-        taboo_wrap.pack(fill=BOTH, expand=True)
-        from tkinter import Listbox
-        self.taboo_box = Listbox(taboo_wrap, selectmode=EXTENDED, height=12,
-                                 exportselection=False)
-        sb = ttk.Scrollbar(taboo_wrap, orient="vertical",
-                           command=self.taboo_box.yview)
-        self.taboo_box.configure(yscrollcommand=sb.set)
-        self.taboo_box.pack(side=LEFT, fill=BOTH, expand=True)
-        sb.pack(side=RIGHT, fill=Y)
-
-        # Populate taboo options from the ingredient catalogue
-        self._taboo_keys: list[str] = []
-        self.reload_taboo_options()
-
-        save = ttk.Button(right, text="Save", command=self._on_save)
-        save.pack(anchor="e", pady=(10, 0))
-
-        self.refresh()
-
-    def refresh(self) -> None:
-        for iid in self.cat_list.get_children():
-            self.cat_list.delete(iid)
-        for c in list_cats(self.app.conn):
-            self.cat_list.insert("", END, iid=str(c.id), values=(c.name,))
-
-    def reload_taboo_options(self) -> None:
-        """Rebuild the taboo Listbox from the latest merged catalogue.
-
-        Called once at construction and again whenever the Library tab
-        adds or deletes a custom ingredient.
-        """
-        self.taboo_box.delete(0, END)
-        self._taboo_keys.clear()
-        for key, row in self.app.ingredients.iterrows():
-            self._taboo_keys.append(key)
-            label = f"{row['display']}  ({row['category']})"
-            if bool(row.get("custom", False)):
-                label = "* " + label
-            self.taboo_box.insert(END, label)
-
-    def _on_select(self, _ev):
-        sel = self.cat_list.selection()
-        if not sel:
-            return
-        cat = get_cat(self.app.conn, self.cat_list.item(sel[0])["values"][0])
-        self.selected_cat_id = cat.id
-        self.name_var.set(cat.name)
-        self.dob_var.set(cat.dob)
-        self.weight_var.set(str(cat.weight_kg))
-        self.activity_var.set(cat.activity)
-        self.texture_var.set(cat.texture_max)
-        self.notes_var.set(cat.notes or "")
-        self.taboo_box.selection_clear(0, END)
-        for i, k in enumerate(self._taboo_keys):
-            if k in cat.taboos:
-                self.taboo_box.selection_set(i)
-
-    def _on_new(self):
-        self.selected_cat_id = None
-        for v in (self.name_var, self.dob_var, self.weight_var, self.notes_var):
-            v.set("")
-        self.activity_var.set("medium")
-        self.texture_var.set("hard")
-        self.taboo_box.selection_clear(0, END)
-        self.cat_list.selection_remove(self.cat_list.selection())
-
-    def _on_save(self):
-        try:
-            name = self.name_var.get().strip()
-            if not name:
-                raise ValueError("name is required")
-            dob = _parse_dob(self.dob_var.get())
-            weight = float(self.weight_var.get())
-            taboos = [self._taboo_keys[i] for i in self.taboo_box.curselection()]
-        except (ValueError, KeyError) as e:
-            messagebox.showerror("Invalid input", str(e))
-            return
-
-        try:
-            if self.selected_cat_id is None:
-                add_cat(
-                    self.app.conn,
-                    name=name, dob=dob, weight_kg=weight,
-                    activity=self.activity_var.get(),
-                    texture_max=self.texture_var.get(),
-                    notes=self.notes_var.get(),
-                    taboos=taboos,
-                )
-            else:
-                update_cat(
-                    self.app.conn, cat_id=self.selected_cat_id,
-                    weight_kg=weight, activity=self.activity_var.get(),
-                    texture_max=self.texture_var.get(),
-                    notes=self.notes_var.get(), taboos=taboos,
-                )
-        except sqlite3.IntegrityError as e:
-            messagebox.showerror("DB error", str(e))
-            return
-
-        self.refresh()
-        self.app.broadcast_cats_changed()
-        messagebox.showinfo("Saved", f"Profile for {name} saved.")
-
-    def _on_delete(self):
-        if self.selected_cat_id is None:
-            return
-        if not messagebox.askyesno("Delete", "Delete this cat and all their feedings?"):
-            return
-        delete_cat(self.app.conn, self.selected_cat_id)
-        self._on_new()
-        self.refresh()
-        self.app.broadcast_cats_changed()
-
-
-# --- generate tab ------------------------------------------------------
-
-class GenerateTab(ttk.Frame):
-    def __init__(self, master, app: "CatFoodApp"):
-        super().__init__(master, padding=10)
-        self.app = app
-
-        top = ttk.Frame(self)
-        top.pack(fill=X)
-        ttk.Label(top, text="Cat:").pack(side=LEFT)
-        self.cat_var = StringVar()
-        self.cat_combo = ttk.Combobox(top, textvariable=self.cat_var,
-                                      state="readonly", width=20)
-        self.cat_combo.pack(side=LEFT, padx=4)
-
-        ttk.Label(top, text="Top:").pack(side=LEFT, padx=(12, 0))
-        self.top_var = StringVar(value="5")
-        ttk.Spinbox(top, from_=1, to=10, width=4,
-                    textvariable=self.top_var).pack(side=LEFT, padx=4)
-
-        ttk.Button(top, text="Generate", command=self._on_generate).pack(side=LEFT, padx=12)
-
-        self.results = ScrolledText(self, height=22, wrap="word", font=("Consolas", 10))
-        self.results.pack(fill=BOTH, expand=True, pady=(10, 0))
-        self.results.configure(state="disabled")
-
-        self.actions_frame = ttk.Frame(self)
-        self.actions_frame.pack(fill=X, pady=(8, 0))
-        ttk.Label(self.actions_frame, text="After serving recipe #:").pack(side=LEFT)
-        self.pick_var = StringVar(value="1")
-        ttk.Spinbox(self.actions_frame, from_=1, to=10, width=4,
-                    textvariable=self.pick_var).pack(side=LEFT, padx=4)
-        for resp in RESPONSES:
-            ttk.Button(
-                self.actions_frame, text=resp,
-                command=lambda r=resp: self._on_feedback(r),
-            ).pack(side=LEFT, padx=4)
-
+    def __init__(self) -> None:
+        # Underscore-prefix every non-method attribute. pywebview walks
+        # `dir()` to expose the API to JS, and a public `ingredients`
+        # DataFrame causes it to recurse into pandas internals (.T → .T → …).
+        self._conn = connect()
+        self._ingredients = load_ingredients()
+        self._model = joblib.load(MODEL_PATH)
         self._last_ranked: list = []
         self._last_cat_id: int | None = None
 
-        self.refresh_cats()
+    # --- ingredients -------------------------------------------------
 
-    def refresh_cats(self) -> None:
-        names = [c.name for c in list_cats(self.app.conn)]
-        self.cat_combo["values"] = names
-        if names and not self.cat_var.get():
-            self.cat_var.set(names[0])
+    def _reload_ingredients(self) -> None:
+        self._ingredients = load_ingredients()
 
-    def _set_results(self, text: str) -> None:
-        self.results.configure(state="normal")
-        self.results.delete("1.0", END)
-        self.results.insert(END, text)
-        self.results.configure(state="disabled")
+    def list_ingredients(self) -> list[dict]:
+        custom = list_custom_keys()
+        out = []
+        for key, row in self._ingredients.iterrows():
+            out.append({
+                "key": key,
+                "display": str(row.get("display", "")),
+                "category": str(row.get("category", "")),
+                "texture": str(row.get("texture", "")),
+                "kcal": float(row.get("kcal", 0) or 0),
+                "protein_g": float(row.get("protein_g", 0) or 0),
+                "fat_g": float(row.get("fat_g", 0) or 0),
+                "custom": key in custom,
+            })
+        return out
 
-    def _on_generate(self):
-        name = self.cat_var.get()
+    def nutrient_columns(self) -> list[str]:
+        return list(NUTRIENT_COLUMNS)
+
+    def categories(self) -> list[str]:
+        return list(VALID_CATEGORIES)
+
+    def textures(self) -> list[str]:
+        return list(VALID_TEXTURES)
+
+    def add_custom_ingredient(self, payload: dict) -> dict:
+        try:
+            nutrients = {
+                k: float(payload.get("nutrients", {}).get(k, 0) or 0)
+                for k in NUTRIENT_COLUMNS
+            }
+            add_custom(
+                key=str(payload.get("key", "")).strip(),
+                display=str(payload.get("display", "")),
+                category=str(payload.get("category", "")),
+                texture=str(payload.get("texture", "")),
+                nutrients=nutrients,
+            )
+        except (ValueError, KeyError) as e:
+            return {"ok": False, "error": str(e)}
+        self._reload_ingredients()
+        return {"ok": True}
+
+    def delete_custom_ingredient(self, key: str) -> dict:
+        if key not in list_custom_keys():
+            return {"ok": False, "error": "Cannot delete a built-in ingredient."}
+        try:
+            delete_custom(key)
+        except KeyError as e:
+            return {"ok": False, "error": str(e)}
+        self._reload_ingredients()
+        return {"ok": True}
+
+    # --- cats --------------------------------------------------------
+
+    def _cat_to_dict(self, c) -> dict:
+        return {
+            "id": c.id, "name": c.name, "dob": c.dob,
+            "weight_kg": c.weight_kg, "activity": c.activity,
+            "texture_max": c.texture_max, "notes": c.notes,
+            "taboos": list(c.taboos),
+        }
+
+    def list_cats(self) -> list[dict]:
+        return [self._cat_to_dict(c) for c in list_cats(self._conn)]
+
+    def get_cat(self, name: str) -> dict | None:
+        try:
+            return self._cat_to_dict(get_cat(self._conn, name))
+        except KeyError:
+            return None
+
+    def save_cat(self, payload: dict) -> dict:
+        try:
+            name = str(payload.get("name", "")).strip()
+            if not name:
+                return {"ok": False, "error": "Name is required."}
+            dob = date.fromisoformat(str(payload.get("dob", "")).strip())
+            weight = float(payload.get("weight_kg", 0))
+            activity = str(payload.get("activity", "medium"))
+            texture_max = str(payload.get("texture_max", "hard"))
+            notes = str(payload.get("notes", "") or "")
+            taboos = list(payload.get("taboos", []) or [])
+            cat_id = payload.get("id")
+        except (ValueError, KeyError, TypeError) as e:
+            return {"ok": False, "error": f"Invalid input: {e}"}
+
+        try:
+            if cat_id in (None, "", 0):
+                add_cat(
+                    self._conn,
+                    name=name, dob=dob, weight_kg=weight,
+                    activity=activity, texture_max=texture_max,
+                    notes=notes, taboos=taboos,
+                )
+            else:
+                update_cat(
+                    self._conn, cat_id=int(cat_id),
+                    weight_kg=weight, activity=activity,
+                    texture_max=texture_max, notes=notes, taboos=taboos,
+                )
+        except sqlite3.IntegrityError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True}
+
+    def delete_cat(self, cat_id: int) -> dict:
+        delete_cat(self._conn, int(cat_id))
+        return {"ok": True}
+
+    # --- generate / feedback ----------------------------------------
+
+    def generate(self, name: str, top_n: int) -> dict:
         if not name:
-            messagebox.showinfo("No cat", "Add a cat in the Profiles tab first.")
-            return
+            return {"ok": False, "error": "Pick a cat first."}
         try:
-            top_n = max(1, int(self.top_var.get()))
-        except ValueError:
+            top_n = max(1, int(top_n))
+        except (ValueError, TypeError):
             top_n = 5
-
         try:
-            cat = get_cat(self.app.conn, name)
+            cat = get_cat(self._conn, name)
             age = compute_age_years(date.fromisoformat(cat.dob))
             pool = applicable_ingredients(
-                self.app.ingredients, taboos=cat.taboos, texture_max=cat.texture_max,
+                self._ingredients, taboos=cat.taboos, texture_max=cat.texture_max,
             )
             cands = propose(pool, n_candidates=300, seed=None)
-            weights = get_weights(self.app.conn, cat.id)
+            weights = get_weights(self._conn, cat.id)
             ranked = rank(
-                cands, model=self.app.model, age_years=age,
-                weights=weights, top_n=top_n, ingredients=self.app.ingredients,
+                cands, model=self._model, age_years=age,
+                weights=weights, top_n=top_n, ingredients=self._ingredients,
             )
         except Exception as e:
-            messagebox.showerror("Generate failed", str(e))
-            return
+            return {"ok": False, "error": str(e)}
 
         self._last_ranked = ranked
         self._last_cat_id = cat.id
 
-        lines = [f"Top {len(ranked)} for {cat.name} (age {age:.1f}y):\n"]
+        recipes = []
         for i, r in enumerate(ranked, 1):
-            tag = "rule" if r.used_rule_scorer else "ml"
-            lines.append(
-                f"[{i}] blended {r.blended:5.1f}  {tag} {r.ml_score:5.1f}  "
-                f"pref x{r.pref_mean:.2f}"
-            )
-            lines.append(f"    {_format_recipe(r.recipe, self.app.ingredients)}")
-            lines.append("")
-        self._set_results("\n".join(lines))
+            recipes.append({
+                "index": i,
+                "blended": float(r.blended),
+                "ml_score": float(r.ml_score),
+                "pref_mean": float(r.pref_mean),
+                "used_rule_scorer": bool(r.used_rule_scorer),
+                "parts": _format_recipe_parts(r.recipe, self._ingredients),
+            })
+        return {
+            "ok": True, "cat": cat.name, "age": float(age), "recipes": recipes,
+        }
 
-    def _on_feedback(self, response: str):
-        if not self._last_ranked:
-            messagebox.showinfo("No recipe", "Generate recipes first.")
-            return
+    def record_feedback(self, pick: int, response: str) -> dict:
+        if not self._last_ranked or self._last_cat_id is None:
+            return {"ok": False, "error": "Generate recipes first."}
         try:
-            pick = int(self.pick_var.get())
-        except ValueError:
-            pick = 1
+            pick = int(pick)
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "Bad pick number."}
         if not (1 <= pick <= len(self._last_ranked)):
-            messagebox.showerror("Bad pick",
-                                 f"Pick must be 1..{len(self._last_ranked)}")
-            return
+            return {"ok": False, "error": f"Pick must be 1..{len(self._last_ranked)}"}
+        if response not in RESPONSES:
+            return {"ok": False, "error": "Bad response."}
         recipe = self._last_ranked[pick - 1].recipe
-        record_feeding(self.app.conn, cat_id=self._last_cat_id,
+        record_feeding(self._conn, cat_id=self._last_cat_id,
                        recipe=recipe, response=response)
-        new_w = update_after_feeding(self.app.conn, cat_id=self._last_cat_id,
+        new_w = update_after_feeding(self._conn, cat_id=self._last_cat_id,
                                      recipe=recipe, response=response)
-        changed = ", ".join(f"{k}:{new_w[k]:.2f}" for k in recipe)
-        messagebox.showinfo("Recorded",
-                            f"Logged '{response}' for recipe #{pick}.\n\n"
-                            f"Updated weights: {changed}")
-        self.app.broadcast_history_changed()
+        return {
+            "ok": True,
+            "weights": {k: float(new_w[k]) for k in recipe},
+            "pick": pick, "response": response,
+        }
 
+    # --- history ----------------------------------------------------
 
-# --- history tab -------------------------------------------------------
-
-class HistoryTab(ttk.Frame):
-    def __init__(self, master, app: "CatFoodApp"):
-        super().__init__(master, padding=10)
-        self.app = app
-
-        top = ttk.Frame(self)
-        top.pack(fill=X)
-        ttk.Label(top, text="Cat:").pack(side=LEFT)
-        self.cat_var = StringVar()
-        self.cat_combo = ttk.Combobox(top, textvariable=self.cat_var,
-                                      state="readonly", width=20)
-        self.cat_combo.pack(side=LEFT, padx=4)
-        self.cat_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_history())
-        ttk.Button(top, text="Refresh", command=self.refresh_history).pack(side=LEFT, padx=8)
-
-        cols = ("id", "served_at", "response", "recipe")
-        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=20)
-        for c, w in zip(cols, (40, 150, 80, 700)):
-            self.tree.heading(c, text=c)
-            self.tree.column(c, width=w, anchor="w")
-        self.tree.pack(fill=BOTH, expand=True, pady=(10, 0))
-
-        self.refresh_cats()
-
-    def refresh_cats(self) -> None:
-        names = [c.name for c in list_cats(self.app.conn)]
-        self.cat_combo["values"] = names
-        if names and not self.cat_var.get():
-            self.cat_var.set(names[0])
-
-    def refresh_history(self) -> None:
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
-        if not self.cat_var.get():
-            return
-        cat = get_cat(self.app.conn, self.cat_var.get())
-        for row in feeding_history(self.app.conn, cat.id, limit=50):
-            self.tree.insert(
-                "", END,
-                values=(
-                    row["id"], row["served_at"], row["response"],
-                    _format_recipe(row["recipe"], self.app.ingredients),
-                ),
-            )
-
-
-# --- library tab -------------------------------------------------------
-
-class LibraryTab(ttk.Frame):
-    """Browse the merged ingredient catalogue and add custom items.
-
-    Custom ingredients are stored in data/processed/custom_ingredients.csv
-    (separate from the frozen base CSV). They appear in recipe generation
-    immediately, and recipes containing them are scored via the rule
-    scorer instead of the ML model — see rank.py.
-    """
-    def __init__(self, master, app: "CatFoodApp"):
-        super().__init__(master, padding=10)
-        self.app = app
-
-        # Top: catalogue table
-        ttk.Label(self, text="Catalogue (custom items prefixed with *):",
-                  font=("", 10, "bold")).pack(anchor="w")
-        cols = ("key", "display", "category", "texture", "kcal", "protein_g", "fat_g")
-        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=12)
-        for c, w in zip(cols, (160, 220, 90, 80, 70, 80, 70)):
-            self.tree.heading(c, text=c)
-            self.tree.column(c, width=w, anchor="w")
-        self.tree.pack(fill=BOTH, expand=True, pady=(4, 4))
-        self.tree.bind("<<TreeviewSelect>>", self._on_select)
-
-        del_btn = ttk.Button(self, text="Delete selected (custom only)",
-                             command=self._on_delete)
-        del_btn.pack(anchor="w", pady=(0, 8))
-
-        # Bottom: add form
-        sep = ttk.Separator(self, orient="horizontal")
-        sep.pack(fill=X, pady=4)
-        ttk.Label(self, text="Add a custom ingredient:",
-                  font=("", 10, "bold")).pack(anchor="w", pady=(4, 4))
-
-        form = ttk.Frame(self)
-        form.pack(fill=X)
-
-        self.key_var      = StringVar()
-        self.display_var  = StringVar()
-        self.category_var = StringVar(value="protein")
-        self.texture_var  = StringVar(value="soft")
-
-        meta_rows = [
-            ("Key (lowercase, no spaces)",
-             ttk.Entry(form, textvariable=self.key_var, width=22)),
-            ("Display name",
-             ttk.Entry(form, textvariable=self.display_var, width=28)),
-            ("Category",
-             ttk.Combobox(form, textvariable=self.category_var,
-                          values=VALID_CATEGORIES, state="readonly", width=14)),
-            ("Texture",
-             ttk.Combobox(form, textvariable=self.texture_var,
-                          values=VALID_TEXTURES, state="readonly", width=14)),
-        ]
-        for i, (label, w) in enumerate(meta_rows):
-            ttk.Label(form, text=label).grid(row=i, column=0, sticky="w", pady=2, padx=(0, 8))
-            w.grid(row=i, column=1, sticky="w", pady=2)
-
-        # Nutrient grid (per 100g as-fed)
-        ttk.Label(form, text="Per 100g as-fed nutrients:",
-                  font=("", 9, "italic")).grid(row=0, column=2, sticky="w",
-                                                padx=(20, 4), pady=2)
-        self.nutrient_vars: dict[str, StringVar] = {}
-        for j, col in enumerate(NUTRIENT_COLUMNS):
-            v = StringVar(value="0")
-            self.nutrient_vars[col] = v
-            r = (j % 6) + 1
-            c = 2 + (j // 6) * 2
-            ttk.Label(form, text=col).grid(row=r, column=c, sticky="w",
-                                            padx=(20, 4), pady=1)
-            ttk.Entry(form, textvariable=v, width=10).grid(
-                row=r, column=c + 1, sticky="w", pady=1
-            )
-
-        ttk.Button(self, text="Add to library",
-                   command=self._on_add).pack(anchor="e", pady=(10, 0))
-
-        self.refresh()
-
-    def refresh(self) -> None:
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
-        custom = list_custom_keys()
-        df = load_ingredients()
-        for key, row in df.iterrows():
-            prefix = "* " if key in custom else "  "
-            self.tree.insert(
-                "", END, iid=key,
-                values=(
-                    prefix + key, row.get("display", ""),
-                    row.get("category", ""), row.get("texture", ""),
-                    f"{row.get('kcal', 0):.0f}",
-                    f"{row.get('protein_g', 0):.1f}",
-                    f"{row.get('fat_g', 0):.1f}",
-                ),
-            )
-
-    def _on_select(self, _ev):
-        pass  # selection drives the Delete button — nothing else for now
-
-    def _on_delete(self):
-        sel = self.tree.selection()
-        if not sel:
-            return
-        key = sel[0]
-        if key not in list_custom_keys():
-            messagebox.showinfo("Built-in", "Cannot delete a built-in ingredient.")
-            return
-        if not messagebox.askyesno("Delete", f"Remove custom ingredient {key!r}?"):
-            return
-        delete_custom(key)
-        self.refresh()
-        self.app.broadcast_ingredients_changed()
-
-    def _on_add(self):
+    def feeding_history(self, name: str, limit: int = 50) -> list[dict]:
+        if not name:
+            return []
         try:
-            nutrients = {k: float(v.get() or 0) for k, v in self.nutrient_vars.items()}
-            add_custom(
-                key=self.key_var.get().strip(),
-                display=self.display_var.get(),
-                category=self.category_var.get(),
-                texture=self.texture_var.get(),
-                nutrients=nutrients,
-            )
-        except (ValueError, KeyError) as e:
-            messagebox.showerror("Invalid input", str(e))
-            return
-
-        # Clear the form, refresh the catalogue, and tell the rest of
-        # the app that the ingredient pool changed.
-        self.key_var.set("")
-        self.display_var.set("")
-        for v in self.nutrient_vars.values():
-            v.set("0")
-        self.refresh()
-        self.app.broadcast_ingredients_changed()
-        messagebox.showinfo("Added", "Custom ingredient saved to library.")
+            cat = get_cat(self._conn, name)
+        except KeyError:
+            return []
+        rows = feeding_history(self._conn, cat.id, limit=int(limit))
+        for row in rows:
+            row["recipe_parts"] = _format_recipe_parts(row["recipe"], self._ingredients)
+        return rows
 
 
-# --- shell -------------------------------------------------------------
+# --- HTML --------------------------------------------------------------
 
-class CatFoodApp(Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Cat Food Recipe System")
-        self.geometry("1080x680")
+INDEX_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Cat Food Recipe System</title>
+<style>
+  :root {
+    --bg:        #FAF6F0;
+    --bg-soft:   #F3ECDF;
+    --panel:     #FFFFFF;
+    --ink:       #3D2E22;
+    --ink-soft:  #6B5847;
+    --muted:     #9A8876;
+    --line:      #E8DFD3;
+    --accent:    #C97B5C;
+    --accent-d:  #A85C40;
+    --butter:    #E8C9A0;
+    --sage:      #7A9471;
+    --danger:    #B85450;
+    --shadow:    0 4px 24px rgba(89, 60, 38, 0.08);
+    --shadow-sm: 0 2px 8px rgba(89, 60, 38, 0.06);
+    --radius:    14px;
+    --radius-sm: 8px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  h1, h2, h3 {
+    font-family: 'Playfair Display', 'Georgia', serif;
+    font-weight: 600;
+    color: var(--ink);
+    margin: 0;
+    letter-spacing: 0.2px;
+  }
+  /* Layout */
+  .app {
+    display: flex; flex-direction: column;
+    height: 100vh;
+    background:
+      radial-gradient(circle at 10% 0%, #F7E8D6 0%, transparent 40%),
+      radial-gradient(circle at 100% 100%, #F3DCC3 0%, transparent 35%),
+      var(--bg);
+  }
+  header {
+    padding: 20px 32px 0;
+    flex-shrink: 0;
+  }
+  .title-row {
+    display: flex; align-items: baseline; gap: 14px;
+    margin-bottom: 4px;
+  }
+  .title-row h1 { font-size: 26px; }
+  .title-row .sub {
+    color: var(--muted); font-size: 13px;
+    font-style: italic;
+  }
+  .tabs {
+    display: flex; gap: 4px;
+    margin-top: 18px;
+    border-bottom: 1px solid var(--line);
+  }
+  .tab {
+    padding: 10px 22px;
+    cursor: pointer;
+    color: var(--ink-soft);
+    font-weight: 500;
+    border: none;
+    background: transparent;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.18s, border-color 0.18s;
+    font-family: inherit;
+    font-size: 14px;
+    letter-spacing: 0.3px;
+  }
+  .tab:hover { color: var(--accent); }
+  .tab.active {
+    color: var(--accent-d);
+    border-bottom-color: var(--accent);
+  }
+  main {
+    flex: 1;
+    padding: 24px 32px 28px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .panel {
+    background: var(--panel);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 24px;
+    border: 1px solid var(--line);
+  }
+  .panel + .panel { margin-top: 16px; }
+  .panel h2 {
+    font-size: 18px;
+    margin-bottom: 14px;
+  }
+  .panel h3 {
+    font-size: 15px;
+    color: var(--ink-soft);
+    margin-bottom: 8px;
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    font-size: 11px;
+  }
+  /* Form controls */
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; letter-spacing: 0.3px; }
+  input[type=text], input[type=number], input[type=date], select, textarea {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 13px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: #fff;
+  }
+  textarea { resize: vertical; min-height: 60px; }
+  button {
+    padding: 8px 18px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: var(--accent);
+    color: #fff;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
+    letter-spacing: 0.3px;
+    box-shadow: var(--shadow-sm);
+  }
+  button:hover { background: var(--accent-d); }
+  button:active { transform: translateY(1px); }
+  button.ghost {
+    background: transparent;
+    color: var(--ink-soft);
+    border: 1px solid var(--line);
+    box-shadow: none;
+  }
+  button.ghost:hover { background: var(--bg-soft); color: var(--ink); }
+  button.danger { background: var(--danger); }
+  button.danger:hover { background: #962F2B; }
+  button.sage { background: var(--sage); }
+  button.sage:hover { background: #5F7A57; }
+  button.icon {
+    padding: 6px 10px; font-size: 12px;
+  }
+  .row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .row > * { flex: 0 0 auto; }
+  .col { display: flex; flex-direction: column; gap: 10px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0,1fr));
+    gap: 12px 18px;
+  }
+  .grid.three { grid-template-columns: repeat(3, minmax(0,1fr)); }
+  .grid.four  { grid-template-columns: repeat(4, minmax(0,1fr)); }
+  /* Two-pane layout */
+  .split {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 20px;
+    flex: 1;
+    min-height: 0;
+  }
+  .scroll {
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+  }
+  .scroll::-webkit-scrollbar { width: 8px; }
+  .scroll::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+  /* Cat list */
+  .cat-list { display: flex; flex-direction: column; gap: 4px; }
+  .cat-item {
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .cat-item:hover { background: var(--bg-soft); }
+  .cat-item.active {
+    background: var(--bg-soft);
+    border-color: var(--butter);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .cat-item .nm { font-weight: 600; color: var(--ink); }
+  .cat-item .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  /* Taboo chips */
+  .chip-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 6px;
+    max-height: 240px;
+    padding: 6px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+  }
+  .chip {
+    padding: 6px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s;
+    color: var(--ink-soft);
+    text-align: center;
+    line-height: 1.2;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--accent-d); }
+  .chip.on {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .chip .ct { font-size: 10px; opacity: 0.7; margin-left: 4px; }
+  .chip.custom::before {
+    content: '★ ';
+    color: var(--butter);
+  }
+  .chip.on.custom::before { color: #fff; }
+  /* Recipe cards */
+  .recipe-list { display: flex; flex-direction: column; gap: 12px; }
+  .recipe-card {
+    padding: 16px 18px;
+    border-radius: var(--radius);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    transition: border-color 0.15s, box-shadow 0.15s;
+    cursor: pointer;
+  }
+  .recipe-card:hover {
+    border-color: var(--butter);
+    box-shadow: var(--shadow-sm);
+  }
+  .recipe-card.picked {
+    border-color: var(--accent);
+    background: #fff;
+    box-shadow: 0 0 0 2px rgba(201, 123, 92, 0.15);
+  }
+  .recipe-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .recipe-rank {
+    font-family: 'Playfair Display', Georgia, serif;
+    font-size: 22px;
+    color: var(--accent-d);
+    font-weight: 600;
+    width: 36px;
+  }
+  .recipe-score {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    background: var(--bg-soft);
+    color: var(--ink-soft);
+  }
+  .badge.ml   { background: #E5EFE3; color: #4F6B47; }
+  .badge.rule { background: #F5DEC8; color: #8C5A37; }
+  .recipe-meta {
+    font-size: 11px; color: var(--muted);
+    display: flex; gap: 14px; flex-wrap: wrap;
+  }
+  .recipe-parts { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .part {
+    padding: 4px 10px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font-size: 12px;
+    color: var(--ink-soft);
+  }
+  .part .g { color: var(--accent-d); font-weight: 600; margin-left: 4px; }
+  /* Tables */
+  .table {
+    width: 100%; border-collapse: collapse;
+    font-size: 13px;
+  }
+  .table th {
+    text-align: left;
+    padding: 8px 10px;
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-soft);
+  }
+  .table td {
+    padding: 10px;
+    border-bottom: 1px solid var(--line);
+    color: var(--ink-soft);
+  }
+  .table tr:hover td { background: var(--bg-soft); cursor: pointer; }
+  .table tr.selected td { background: #FBEFE0; }
+  .resp {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .resp.ate_all { background: #E5EFE3; color: #4F6B47; }
+  .resp.half    { background: #FBEFE0; color: #8C5A37; }
+  .resp.refused { background: #F4DAD9; color: #8B3A37; }
+  /* Empty / status */
+  .empty {
+    padding: 36px 18px;
+    text-align: center;
+    color: var(--muted);
+    font-style: italic;
+  }
+  .status {
+    padding: 8px 14px;
+    margin: 10px 0;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    display: none;
+  }
+  .status.show { display: block; }
+  .status.ok    { background: #E5EFE3; color: #4F6B47; }
+  .status.err   { background: #F4DAD9; color: #8B3A37; }
+  /* Toast */
+  .toast {
+    position: fixed; right: 24px; bottom: 24px;
+    background: var(--ink); color: #fff;
+    padding: 12px 18px;
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow);
+    font-size: 13px;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.25s, transform 0.25s;
+    pointer-events: none;
+    max-width: 360px;
+    z-index: 999;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.err { background: var(--danger); }
+  /* Tab pages */
+  .page { display: none; flex: 1; min-height: 0; flex-direction: column; }
+  .page.active { display: flex; }
+  /* Generate layout */
+  .gen-bar { display: flex; gap: 14px; align-items: flex-end; }
+  .gen-bar .grow { flex: 1; }
+  .feedback-bar {
+    margin-top: 14px;
+    padding: 14px 16px;
+    background: var(--bg-soft);
+    border-radius: var(--radius);
+    display: flex; gap: 10px; align-items: center;
+    border: 1px dashed var(--butter);
+  }
+  .feedback-bar .lbl {
+    font-size: 12px; color: var(--ink-soft);
+    margin-right: 6px;
+  }
+  /* History/Library tabs use full panel, generate uses split */
+  .full-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .full-panel .scroll { flex: 1; }
+  /* Library forms */
+  .library-grid {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    gap: 16px;
+    flex: 1;
+    min-height: 0;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="title-row">
+      <h1>Cat Food Recipe System</h1>
+      <span class="sub">a warm meal, made with care</span>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-page="profiles">Profiles</button>
+      <button class="tab" data-page="generate">Generate</button>
+      <button class="tab" data-page="history">History</button>
+      <button class="tab" data-page="library">Library</button>
+    </nav>
+  </header>
+  <main>
+    <!-- PROFILES -->
+    <section class="page active" id="page-profiles">
+      <div class="split">
+        <div class="panel" style="display:flex; flex-direction:column; min-height:0;">
+          <h2>Cats</h2>
+          <div class="cat-list scroll" id="catList" style="flex:1; min-height:0;"></div>
+          <div style="display:flex; gap:8px; margin-top:12px;">
+            <button id="catNew" class="ghost">+ New</button>
+            <button id="catDelete" class="ghost danger" style="color:var(--danger); border-color:var(--danger);">Delete</button>
+          </div>
+        </div>
+        <div class="panel scroll" style="min-height:0;">
+          <h2 id="profileTitle">New profile</h2>
+          <form id="profileForm" autocomplete="off">
+            <div class="grid">
+              <div><label>Name</label><input type="text" id="pf-name"></div>
+              <div><label>Date of Birth</label><input type="date" id="pf-dob"></div>
+              <div><label>Weight (kg)</label><input type="number" step="0.1" id="pf-weight"></div>
+              <div><label>Activity</label><select id="pf-activity"></select></div>
+              <div><label>Texture max</label><select id="pf-texture"></select></div>
+              <div><label>Notes</label><input type="text" id="pf-notes"></div>
+            </div>
+            <h3 style="margin-top:18px;">Taboos · click to toggle</h3>
+            <div class="chip-grid scroll" id="tabooChips"></div>
+            <div style="display:flex; justify-content:flex-end; margin-top:14px;">
+              <button type="submit" id="profileSave">Save profile</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
 
-        # Lazy-load shared resources up front so the UI never stalls later.
-        if not INGREDIENTS_CSV.exists():
-            messagebox.showerror("Missing data",
-                                 f"{INGREDIENTS_CSV} not found.\n"
-                                 "Run `py -m src.data.build_dataset` first.")
-            self.destroy()
-            return
-        if not MODEL_PATH.exists():
-            messagebox.showerror("Missing model",
-                                 f"{MODEL_PATH} not found.\n"
-                                 "Run `py -m src.ml.train_alt` first.")
-            self.destroy()
-            return
+    <!-- GENERATE -->
+    <section class="page" id="page-generate">
+      <div class="panel" style="margin-bottom:16px;">
+        <div class="gen-bar">
+          <div class="grow" style="max-width:280px;">
+            <label>Cat</label>
+            <select id="gn-cat"></select>
+          </div>
+          <div style="width:90px;">
+            <label>Top N</label>
+            <input type="number" id="gn-top" value="5" min="1" max="10">
+          </div>
+          <button id="gn-go">Generate recipes</button>
+        </div>
+        <div class="feedback-bar" id="feedbackBar" style="display:none;">
+          <span class="lbl">After serving recipe</span>
+          <select id="fb-pick" style="width:70px;"></select>
+          <span class="lbl" style="margin-left:6px;">the cat</span>
+          <button class="sage" data-resp="ate_all">ate it all</button>
+          <button class="ghost" data-resp="half">ate half</button>
+          <button class="danger" data-resp="refused">refused</button>
+        </div>
+      </div>
+      <div class="panel full-panel">
+        <h3 id="gn-summary" style="margin-bottom:8px;">Pick a cat and generate to begin</h3>
+        <div class="scroll" style="flex:1;">
+          <div class="recipe-list" id="recipeList"></div>
+        </div>
+      </div>
+    </section>
 
-        self.ingredients = load_ingredients()
-        self.model = joblib.load(MODEL_PATH)
-        self.conn = connect()
+    <!-- HISTORY -->
+    <section class="page" id="page-history">
+      <div class="panel" style="margin-bottom:16px;">
+        <div class="gen-bar">
+          <div class="grow" style="max-width:280px;">
+            <label>Cat</label>
+            <select id="hi-cat"></select>
+          </div>
+          <button id="hi-refresh" class="ghost">Refresh</button>
+        </div>
+      </div>
+      <div class="panel full-panel">
+        <div class="scroll" style="flex:1;">
+          <table class="table" id="historyTable">
+            <thead><tr>
+              <th style="width:50px;">#</th>
+              <th style="width:160px;">Served at</th>
+              <th style="width:110px;">Response</th>
+              <th>Recipe</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+          <div class="empty" id="historyEmpty" style="display:none;">No feedings recorded yet for this cat.</div>
+        </div>
+      </div>
+    </section>
 
-        nb = ttk.Notebook(self)
-        nb.pack(fill=BOTH, expand=True)
-        self.profile_tab  = ProfileTab(nb, self)
-        self.generate_tab = GenerateTab(nb, self)
-        self.history_tab  = HistoryTab(nb, self)
-        self.library_tab  = LibraryTab(nb, self)
-        nb.add(self.profile_tab,  text="Profiles")
-        nb.add(self.generate_tab, text="Generate")
-        nb.add(self.history_tab,  text="History")
-        nb.add(self.library_tab,  text="Library")
-        nb.bind("<<NotebookTabChanged>>", self._on_tab_change)
-        self._nb = nb
+    <!-- LIBRARY -->
+    <section class="page" id="page-library">
+      <div class="library-grid">
+        <div class="panel scroll" style="min-height:0;">
+          <h2>Catalogue</h2>
+          <p style="color:var(--muted); font-size:12px; margin:0 0 8px;">★ marks user-added items.</p>
+          <table class="table" id="ingredientTable">
+            <thead><tr>
+              <th>Key</th><th>Display</th><th>Cat.</th><th>Tex.</th>
+              <th style="text-align:right;">kcal</th>
+              <th style="text-align:right;">protein</th>
+              <th style="text-align:right;">fat</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+          <div style="margin-top:10px;">
+            <button id="lib-delete" class="ghost danger" style="color:var(--danger); border-color:var(--danger);" disabled>Delete selected (custom only)</button>
+          </div>
+        </div>
+        <div class="panel scroll" style="min-height:0;">
+          <h2>Add a custom ingredient</h2>
+          <form id="customForm" autocomplete="off">
+            <div class="grid">
+              <div><label>Key (lowercase)</label><input type="text" id="cf-key"></div>
+              <div><label>Display name</label><input type="text" id="cf-display"></div>
+              <div><label>Category</label><select id="cf-category"></select></div>
+              <div><label>Texture</label><select id="cf-texture"></select></div>
+            </div>
+            <h3 style="margin-top:14px;">Per 100 g as-fed nutrients</h3>
+            <div class="grid three" id="nutrientGrid"></div>
+            <div style="display:flex; justify-content:flex-end; margin-top:14px;">
+              <button type="submit">Add to library</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
 
-    def broadcast_cats_changed(self) -> None:
-        """Profile tab tells the others a cat list might have changed."""
-        self.generate_tab.refresh_cats()
-        self.history_tab.refresh_cats()
+<script>
+const api = () => window.pywebview.api;
 
-    def broadcast_history_changed(self) -> None:
-        """Generate tab tells History a new feeding landed."""
-        self.history_tab.refresh_history()
+let state = {
+  cats: [],
+  ingredients: [],
+  selectedCatId: null,
+  editingTaboos: new Set(),
+  selectedIngredient: null,
+  lastRecipes: [],
+};
 
-    def broadcast_ingredients_changed(self) -> None:
-        """Library tab tells the rest of the app that the catalogue grew/shrunk.
+function $(sel, root=document) { return root.querySelector(sel); }
+function $$(sel, root=document) { return Array.from(root.querySelectorAll(sel)); }
 
-        The Profile tab's taboo Listbox is rebuilt from scratch so newly
-        added ingredients are selectable as taboos. The Generate tab and
-        recommender pull from `self.app.ingredients` at call time, so we
-        just refresh the cached frame here.
-        """
-        self.ingredients = load_ingredients()
-        # ProfileTab caches taboo options at construction time → rebuild it.
-        self.profile_tab.reload_taboo_options()
+function toast(msg, kind='') {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.className = 'toast show ' + kind;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.classList.remove('show'); }, 2800);
+}
 
-    def _on_tab_change(self, _ev) -> None:
-        current = self._nb.select()
-        if current == str(self.history_tab):
-            self.history_tab.refresh_history()
+// Tab switching
+$$('.tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $$('.tab').forEach(t => t.classList.remove('active'));
+    $$('.page').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    $('#page-' + btn.dataset.page).classList.add('active');
+    if (btn.dataset.page === 'history') refreshHistory();
+  });
+});
+
+// --- Profiles ---------------------------------------------------------
+
+function renderCatList() {
+  const list = $('#catList');
+  list.innerHTML = '';
+  if (!state.cats.length) {
+    const e = document.createElement('div');
+    e.className = 'empty';
+    e.textContent = 'No cats yet.\nClick "+ New" to add one.';
+    e.style.whiteSpace = 'pre-line';
+    list.appendChild(e);
+    return;
+  }
+  state.cats.forEach(c => {
+    const div = document.createElement('div');
+    div.className = 'cat-item' + (c.id === state.selectedCatId ? ' active' : '');
+    div.innerHTML = `<div class="nm">${escapeHtml(c.name)}</div>
+      <div class="meta">${c.weight_kg.toFixed(1)} kg · ${escapeHtml(c.activity)} · texture ≤ ${escapeHtml(c.texture_max)}</div>`;
+    div.addEventListener('click', () => selectCat(c.id));
+    list.appendChild(div);
+  });
+}
+
+function renderTabooChips() {
+  const grid = $('#tabooChips');
+  grid.innerHTML = '';
+  state.ingredients.forEach(ing => {
+    const chip = document.createElement('div');
+    let cls = 'chip';
+    if (state.editingTaboos.has(ing.key)) cls += ' on';
+    if (ing.custom) cls += ' custom';
+    chip.className = cls;
+    chip.innerHTML = `${escapeHtml(ing.display)}<span class="ct">${escapeHtml(ing.category)}</span>`;
+    chip.addEventListener('click', () => {
+      if (state.editingTaboos.has(ing.key)) state.editingTaboos.delete(ing.key);
+      else state.editingTaboos.add(ing.key);
+      renderTabooChips();
+    });
+    grid.appendChild(chip);
+  });
+}
+
+function fillSelect(sel, items, selected) {
+  sel.innerHTML = '';
+  items.forEach(v => {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = v;
+    if (v === selected) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
+function clearProfileForm() {
+  state.selectedCatId = null;
+  state.editingTaboos = new Set();
+  $('#profileTitle').textContent = 'New profile';
+  $('#pf-name').value = '';
+  $('#pf-name').readOnly = false;
+  $('#pf-dob').value = '';
+  $('#pf-weight').value = '';
+  $('#pf-activity').value = 'medium';
+  $('#pf-texture').value = 'hard';
+  $('#pf-notes').value = '';
+  renderCatList();
+  renderTabooChips();
+}
+
+function selectCat(id) {
+  const cat = state.cats.find(c => c.id === id);
+  if (!cat) return;
+  state.selectedCatId = id;
+  state.editingTaboos = new Set(cat.taboos);
+  $('#profileTitle').textContent = 'Edit · ' + cat.name;
+  $('#pf-name').value = cat.name;
+  $('#pf-name').readOnly = true; // name is unique key — can't rename here
+  $('#pf-dob').value = cat.dob;
+  $('#pf-weight').value = cat.weight_kg;
+  $('#pf-activity').value = cat.activity;
+  $('#pf-texture').value = cat.texture_max;
+  $('#pf-notes').value = cat.notes || '';
+  renderCatList();
+  renderTabooChips();
+}
+
+$('#catNew').addEventListener('click', clearProfileForm);
+
+$('#catDelete').addEventListener('click', async () => {
+  if (state.selectedCatId == null) return;
+  const cat = state.cats.find(c => c.id === state.selectedCatId);
+  if (!cat) return;
+  if (!confirm(`Delete ${cat.name} and all their feedings?`)) return;
+  await api().delete_cat(state.selectedCatId);
+  await reloadCats();
+  clearProfileForm();
+  toast(`Deleted ${cat.name}.`);
+});
+
+$('#profileForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const payload = {
+    id: state.selectedCatId,
+    name: $('#pf-name').value.trim(),
+    dob: $('#pf-dob').value,
+    weight_kg: parseFloat($('#pf-weight').value),
+    activity: $('#pf-activity').value,
+    texture_max: $('#pf-texture').value,
+    notes: $('#pf-notes').value,
+    taboos: Array.from(state.editingTaboos),
+  };
+  const res = await api().save_cat(payload);
+  if (!res.ok) { toast(res.error, 'err'); return; }
+  toast(`Saved ${payload.name}.`);
+  await reloadCats();
+  // Re-select by name
+  const c = state.cats.find(x => x.name === payload.name);
+  if (c) selectCat(c.id);
+});
+
+// --- Generate ---------------------------------------------------------
+
+$('#gn-go').addEventListener('click', async () => {
+  const name = $('#gn-cat').value;
+  const top = parseInt($('#gn-top').value || '5', 10);
+  if (!name) { toast('Add a cat in Profiles first.', 'err'); return; }
+  $('#gn-summary').textContent = 'Generating…';
+  $('#recipeList').innerHTML = '';
+  const res = await api().generate(name, top);
+  if (!res.ok) { toast(res.error, 'err'); $('#gn-summary').textContent = 'Generation failed.'; return; }
+  state.lastRecipes = res.recipes;
+  $('#gn-summary').textContent = `Top ${res.recipes.length} for ${res.cat} · age ${res.age.toFixed(1)} y`;
+  renderRecipes(res.recipes);
+  // populate feedback selector
+  const fb = $('#fb-pick');
+  fb.innerHTML = '';
+  res.recipes.forEach(r => {
+    const o = document.createElement('option');
+    o.value = r.index; o.textContent = '#' + r.index;
+    fb.appendChild(o);
+  });
+  $('#feedbackBar').style.display = res.recipes.length ? 'flex' : 'none';
+});
+
+function renderRecipes(recipes) {
+  const list = $('#recipeList');
+  list.innerHTML = '';
+  if (!recipes.length) {
+    list.innerHTML = '<div class="empty">No recipes returned.</div>';
+    return;
+  }
+  recipes.forEach(r => {
+    const card = document.createElement('div');
+    card.className = 'recipe-card';
+    card.dataset.index = r.index;
+    const tag = r.used_rule_scorer
+      ? '<span class="badge rule">rule scorer</span>'
+      : '<span class="badge ml">ML model</span>';
+    const parts = r.parts.map(p =>
+      `<span class="part">${escapeHtml(p.display)}<span class="g">${p.grams.toFixed(1)} g</span></span>`
+    ).join('');
+    card.innerHTML = `
+      <div class="recipe-head">
+        <div style="display:flex; align-items:baseline; gap:14px;">
+          <span class="recipe-rank">${r.index}</span>
+          <span class="recipe-score">${r.blended.toFixed(1)}</span>
+          ${tag}
+        </div>
+        <div class="recipe-meta">
+          <span>nutrition ${r.ml_score.toFixed(1)}</span>
+          <span>preference ×${r.pref_mean.toFixed(2)}</span>
+        </div>
+      </div>
+      <div class="recipe-parts">${parts}</div>
+    `;
+    card.addEventListener('click', () => {
+      $$('.recipe-card').forEach(c => c.classList.remove('picked'));
+      card.classList.add('picked');
+      $('#fb-pick').value = r.index;
+    });
+    list.appendChild(card);
+  });
+}
+
+$$('[data-resp]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const pick = parseInt($('#fb-pick').value, 10);
+    const resp = btn.dataset.resp;
+    const res = await api().record_feedback(pick, resp);
+    if (!res.ok) { toast(res.error, 'err'); return; }
+    const changes = Object.entries(res.weights)
+      .map(([k, v]) => `${k}:${v.toFixed(2)}`).join(', ');
+    toast(`Logged "${resp}" · ${changes}`);
+  });
+});
+
+// --- History ----------------------------------------------------------
+
+$('#hi-refresh').addEventListener('click', refreshHistory);
+$('#hi-cat').addEventListener('change', refreshHistory);
+
+async function refreshHistory() {
+  const name = $('#hi-cat').value;
+  const tbody = $('#historyTable tbody');
+  tbody.innerHTML = '';
+  if (!name) {
+    $('#historyEmpty').style.display = 'block';
+    $('#historyEmpty').textContent = 'No cats yet.';
+    return;
+  }
+  const rows = await api().feeding_history(name, 50);
+  if (!rows.length) {
+    $('#historyEmpty').style.display = 'block';
+    $('#historyEmpty').textContent = 'No feedings yet for this cat.';
+    return;
+  }
+  $('#historyEmpty').style.display = 'none';
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+    const parts = row.recipe_parts.map(p =>
+      `<span class="part">${escapeHtml(p.display)}<span class="g">${p.grams.toFixed(1)} g</span></span>`
+    ).join(' ');
+    tr.innerHTML = `
+      <td>${row.id}</td>
+      <td>${escapeHtml(row.served_at.replace('T', ' '))}</td>
+      <td><span class="resp ${row.response}">${escapeHtml(row.response)}</span></td>
+      <td>${parts}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+// --- Library ----------------------------------------------------------
+
+function renderIngredientTable() {
+  const tbody = $('#ingredientTable tbody');
+  tbody.innerHTML = '';
+  state.ingredients.forEach(ing => {
+    const tr = document.createElement('tr');
+    if (state.selectedIngredient === ing.key) tr.classList.add('selected');
+    tr.innerHTML = `
+      <td>${ing.custom ? '★ ' : ''}${escapeHtml(ing.key)}</td>
+      <td>${escapeHtml(ing.display)}</td>
+      <td>${escapeHtml(ing.category)}</td>
+      <td>${escapeHtml(ing.texture)}</td>
+      <td style="text-align:right;">${ing.kcal.toFixed(0)}</td>
+      <td style="text-align:right;">${ing.protein_g.toFixed(1)}</td>
+      <td style="text-align:right;">${ing.fat_g.toFixed(1)}</td>`;
+    tr.addEventListener('click', () => {
+      state.selectedIngredient = ing.key;
+      $('#lib-delete').disabled = !ing.custom;
+      renderIngredientTable();
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+$('#lib-delete').addEventListener('click', async () => {
+  const k = state.selectedIngredient;
+  if (!k) return;
+  if (!confirm(`Remove custom ingredient ${k}?`)) return;
+  const res = await api().delete_custom_ingredient(k);
+  if (!res.ok) { toast(res.error, 'err'); return; }
+  state.selectedIngredient = null;
+  $('#lib-delete').disabled = true;
+  await reloadIngredients();
+  toast(`Removed ${k}.`);
+});
+
+$('#customForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const nutrients = {};
+  $$('#nutrientGrid input').forEach(inp => {
+    nutrients[inp.dataset.col] = parseFloat(inp.value || '0');
+  });
+  const payload = {
+    key: $('#cf-key').value.trim(),
+    display: $('#cf-display').value,
+    category: $('#cf-category').value,
+    texture: $('#cf-texture').value,
+    nutrients,
+  };
+  const res = await api().add_custom_ingredient(payload);
+  if (!res.ok) { toast(res.error, 'err'); return; }
+  toast(`Added ${payload.key}.`);
+  $('#cf-key').value = '';
+  $('#cf-display').value = '';
+  $$('#nutrientGrid input').forEach(inp => inp.value = '0');
+  await reloadIngredients();
+});
+
+// --- Reload helpers ---------------------------------------------------
+
+async function reloadCats() {
+  state.cats = await api().list_cats();
+  renderCatList();
+  // Refresh dropdowns
+  const names = state.cats.map(c => c.name);
+  fillSelect($('#gn-cat'), names.length ? names : [], names[0]);
+  fillSelect($('#hi-cat'), names.length ? names : [], names[0]);
+}
+
+async function reloadIngredients() {
+  state.ingredients = await api().list_ingredients();
+  renderIngredientTable();
+  if (state.selectedCatId == null) renderTabooChips();
+  else {
+    // keep editingTaboos as-is, just re-render
+    renderTabooChips();
+  }
+}
+
+// --- Boot -------------------------------------------------------------
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+
+async function boot() {
+  // Selects
+  fillSelect($('#pf-activity'), ['low', 'medium', 'high'], 'medium');
+  fillSelect($('#pf-texture'),  ['soft', 'medium', 'hard'], 'hard');
+
+  const cats = await api().categories();
+  const texs = await api().textures();
+  const cols = await api().nutrient_columns();
+  fillSelect($('#cf-category'), cats, 'protein');
+  fillSelect($('#cf-texture'),  texs, 'soft');
+  const grid = $('#nutrientGrid');
+  cols.forEach(col => {
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `<label>${escapeHtml(col)}</label>
+      <input type="number" step="0.1" data-col="${escapeHtml(col)}" value="0">`;
+    grid.appendChild(wrap);
+  });
+
+  await reloadIngredients();
+  await reloadCats();
+  clearProfileForm();
+}
+
+// pywebview injects api asynchronously. Guard so boot only fires once
+// (both 'pywebviewready' and our timeout fallback can race).
+let booted = false;
+function safeBoot() {
+  if (booted) return;
+  if (!(window.pywebview && window.pywebview.api)) return;
+  booted = true;
+  boot().catch(err => toast('Boot failed: ' + err.message, 'err'));
+}
+window.addEventListener('pywebviewready', safeBoot);
+setTimeout(safeBoot, 400);
+</script>
+</body>
+</html>
+"""
+
+
+# --- entry point -------------------------------------------------------
+
+def _missing_data_message() -> str | None:
+    if not INGREDIENTS_CSV.exists():
+        return (f"{INGREDIENTS_CSV} not found.\n"
+                "Run `py -m src.data.build_dataset` first.")
+    if not MODEL_PATH.exists():
+        return (f"{MODEL_PATH} not found.\n"
+                "Run `py -m src.ml.train_alt` first.")
+    return None
 
 
 def main() -> None:
-    app = CatFoodApp()
-    app.mainloop()
+    msg = _missing_data_message()
+    if msg:
+        print(msg, file=sys.stderr)
+        sys.exit(1)
+
+    api = Api()
+    webview.create_window(
+        "Cat Food Recipe System",
+        html=INDEX_HTML,
+        js_api=api,
+        width=1180,
+        height=780,
+        min_size=(960, 640),
+        background_color="#FAF6F0",
+    )
+    webview.start()
 
 
 if __name__ == "__main__":

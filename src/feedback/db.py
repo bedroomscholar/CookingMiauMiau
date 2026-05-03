@@ -71,10 +71,16 @@ class Cat:
 
 
 def connect(path: Path | str | None = None) -> sqlite3.Connection:
-    """Open (and lazily init) a SQLite connection."""
+    """Open (and lazily init) a SQLite connection.
+
+    `check_same_thread=False` lets the same connection be reused from
+    pywebview's worker threads (each JS->Python call runs on a thread
+    from the bridge pool). The app is single-user so concurrent writes
+    are rare; SQLite's own locking keeps them safe.
+    """
     target = Path(path) if path else DB_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(target)
+    conn = sqlite3.connect(target, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
