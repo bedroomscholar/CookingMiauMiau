@@ -31,7 +31,7 @@ from src.feedback.db import (
 from src.feedback.weights import get_weights, update_after_feeding
 from src.nutrition.targets import compute_age_years
 from src.recommender.filters import applicable_ingredients
-from src.recommender.generator import propose
+from src.recommender.generator import daily_grams, propose
 from src.recommender.rank import Ranked, rank
 
 MODEL_PATH = MODELS_DIR / "gbr.joblib"
@@ -118,7 +118,8 @@ def _generate_for_cat(
     pool = applicable_ingredients(
         ingredients, taboos=cat.taboos, texture_max=cat.texture_max
     )
-    candidates = propose(pool, n_candidates=300, seed=seed)
+    target = daily_grams(cat.weight_kg, cat.activity)
+    candidates = propose(pool, n_candidates=300, seed=seed, target_grams=target)
     weights = get_weights(conn, cat.id)
     return rank(
         candidates, model=model, age_years=age, weights=weights,
@@ -141,7 +142,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
         return 1
 
     age = compute_age_years(date.fromisoformat(cat.dob))
-    print(f"Top {len(ranked)} recipes for {cat.name} (age {age:.1f}y):\n")
+    target = daily_grams(cat.weight_kg, cat.activity)
+    print(f"Top {len(ranked)} daily recipes for {cat.name} "
+          f"(age {age:.1f}y, ~{target:.0f}g/day):\n")
     for i, r in enumerate(ranked, 1):
         print(f"  [{i}] blended {r.blended:5.1f}  ml {r.ml_score:5.1f}  "
               f"pref x{r.pref_mean:.2f}")

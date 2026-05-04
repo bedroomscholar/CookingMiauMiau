@@ -38,7 +38,7 @@ from src.feedback.db import (
 from src.feedback.weights import get_weights, update_after_feeding
 from src.nutrition.targets import compute_age_years
 from src.recommender.filters import applicable_ingredients
-from src.recommender.generator import propose
+from src.recommender.generator import daily_grams, propose
 from src.recommender.rank import rank
 
 MODEL_PATH = MODELS_DIR / "gbr.joblib"
@@ -212,7 +212,8 @@ class Api:
             pool = applicable_ingredients(
                 self._ingredients, taboos=cat.taboos, texture_max=cat.texture_max,
             )
-            cands = propose(pool, n_candidates=300, seed=None)
+            target = daily_grams(cat.weight_kg, cat.activity)
+            cands = propose(pool, n_candidates=300, seed=None, target_grams=target)
             weights = get_weights(self._conn, cat.id)
             ranked = rank(
                 cands, model=self._model, age_years=age,
@@ -231,11 +232,11 @@ class Api:
                 "blended": float(r.blended),
                 "ml_score": float(r.ml_score),
                 "pref_mean": float(r.pref_mean),
-                "used_rule_scorer": bool(r.used_rule_scorer),
                 "parts": _format_recipe_parts(r.recipe, self._ingredients),
             })
         return {
-            "ok": True, "cat": cat.name, "age": float(age), "recipes": recipes,
+            "ok": True, "cat": cat.name, "age": float(age),
+            "daily_grams": float(target), "recipes": recipes,
         }
 
     def record_feedback(self, pick: int, response: str) -> dict:
@@ -772,7 +773,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
       <div class="panel full-panel">
-        <h3 id="gn-summary" style="margin-bottom:8px;">Pick a cat and generate to begin</h3>
+        <h3 id="gn-summary" style="margin-bottom:4px;">Pick a cat and generate to begin</h3>
+        <p style="color:var(--muted); font-size:12px; margin:0 0 10px;">Each recipe is one full day of food, sized to the cat's weight and activity level.</p>
         <div class="scroll" style="flex:1;">
           <div class="recipe-list" id="recipeList"></div>
         </div>
@@ -1010,7 +1012,7 @@ $('#gn-go').addEventListener('click', async () => {
   const res = await api().generate(name, top);
   if (!res.ok) { toast(res.error, 'err'); $('#gn-summary').textContent = 'Generation failed.'; return; }
   state.lastRecipes = res.recipes;
-  $('#gn-summary').textContent = `Top ${res.recipes.length} for ${res.cat} · age ${res.age.toFixed(1)} y`;
+  $('#gn-summary').textContent = `Top ${res.recipes.length} daily recipes for ${res.cat} · age ${res.age.toFixed(1)} y · ~${Math.round(res.daily_grams)} g per day`;
   renderRecipes(res.recipes);
   // populate feedback selector
   const fb = $('#fb-pick');
@@ -1034,9 +1036,6 @@ function renderRecipes(recipes) {
     const card = document.createElement('div');
     card.className = 'recipe-card';
     card.dataset.index = r.index;
-    const tag = r.used_rule_scorer
-      ? '<span class="badge rule">rule scorer</span>'
-      : '<span class="badge ml">ML model</span>';
     const parts = r.parts.map(p =>
       `<span class="part">${escapeHtml(p.display)}<span class="g">${p.grams.toFixed(1)} g</span></span>`
     ).join('');
@@ -1045,7 +1044,6 @@ function renderRecipes(recipes) {
         <div style="display:flex; align-items:baseline; gap:14px;">
           <span class="recipe-rank">${r.index}</span>
           <span class="recipe-score">${r.blended.toFixed(1)}</span>
-          ${tag}
         </div>
         <div class="recipe-meta">
           <span>nutrition ${r.ml_score.toFixed(1)}</span>

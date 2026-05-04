@@ -6,11 +6,11 @@ Two CSVs at runtime:
 
 `load_ingredients()` returns a merged DataFrame with an extra boolean
 column `custom` so the UI can mark user rows. The ML training pipeline
-deliberately ignores custom rows (it loads the base CSV directly via
-ml/dataset.py) — its feature vector is fixed-length over SHORTLIST and
-cannot accommodate new keys without retraining. The recommender's
-ranker handles this honestly by falling back to the rule scorer when a
-recipe contains custom keys.
+intentionally trains on the base CSV only (custom rows are user-local
+and not part of the released model), but inference works on any
+ingredient — the trained model takes per-100g-DM nutrient features
+(see ml/features.py), so a custom ingredient with a valid nutrient row
+is scored exactly like a built-in one.
 """
 from __future__ import annotations
 

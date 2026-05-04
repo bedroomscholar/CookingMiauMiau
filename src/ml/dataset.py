@@ -39,7 +39,7 @@ def prepare(n: int = 15000, seed: int = 42, test_size: float = 0.2) -> Dataset:
     ingredients = pd.read_csv(INGREDIENTS_CSV).set_index("key")
     recipes, ages = generate(n, seed=seed)
     y = label(recipes, ages, ingredients)
-    X = recipes_to_matrix(recipes, ages)
+    X = recipes_to_matrix(recipes, ages, ingredients)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=seed
     )
