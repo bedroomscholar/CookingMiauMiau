@@ -281,7 +281,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Cat Food Recipe System</title>
+<title>CookingMiauMiau</title>
 <style>
   :root {
     --bg:        #FAF6F0;
@@ -705,8 +705,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div class="app">
   <header>
     <div class="title-row">
-      <h1>Cat Food Recipe System</h1>
-      <span class="sub">a warm meal, made with care</span>
+      <h1>CookingMiauMiau</h1>
+      <span class="sub">thank you my dear human</span>
     </div>
     <nav class="tabs">
       <button class="tab active" data-page="profiles">Profiles</button>
@@ -1265,7 +1265,7 @@ def main() -> None:
 
     api = Api()
     webview.create_window(
-        "Cat Food Recipe System",
+        "CookingMiauMiau",
         html=INDEX_HTML,
         js_api=api,
         width=1180,
